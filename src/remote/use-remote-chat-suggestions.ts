@@ -1,19 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import {
-	piSessionSuggestions,
-	type ComposerSuggestion,
-} from "@/components/chat/chat-composer-suggestions";
+import { piSessionSuggestions, type ComposerSuggestion } from "@/components/chat/chat-composer-suggestions";
 import { createFileSuggestions } from "@/components/chat/chat-file-suggestions";
-import {
-	createPiCommandSuggestions,
-	createPiExtensionCommandNames,
-} from "@/lib/pi-command-suggestions";
+import { usePiCommandCatalog } from "@/components/chat/use-pi-command-catalog";
 import type { PiCommand } from "@/lib/pi-runtime";
 import type { WebPiloClient } from "./web-pilo-client";
 
-type UseRemoteChatSuggestionsOptions = {
+type Options = {
 	client: WebPiloClient | null;
 	activeProjectId: string;
 	readOnly: boolean;
@@ -21,126 +15,30 @@ type UseRemoteChatSuggestionsOptions = {
 	rpc: <T>(command: Record<string, unknown>, timeoutMs?: number) => Promise<T>;
 };
 
-export function useRemoteChatSuggestions({
-	client,
-	activeProjectId,
-	readOnly,
-	ensureDraftRuntime,
-	rpc,
-}: UseRemoteChatSuggestionsOptions) {
+export function useRemoteChatSuggestions({ client, activeProjectId, readOnly, ensureDraftRuntime, rpc }: Options) {
 	const { t } = useTranslation();
-
-	const [fileSuggestions, setFileSuggestions] = useState<ComposerSuggestion[]>(
-		[],
-	);
-	const [commandSuggestions, setCommandSuggestions] = useState<
-		ComposerSuggestion[]
-	>([]);
-	const extensionCommandNamesRef = useRef<Set<string>>(new Set());
-	const commandsLoadedRef = useRef(false);
-	const commandLoadingRef = useRef(false);
-	const fileSuggestionTimerRef = useRef<number | null>(null);
-	const fileSuggestionRequestRef = useRef(0);
-
-	const loadCommands = useCallback(async () => {
-		if (commandsLoadedRef.current || commandLoadingRef.current || readOnly)
-			return;
-		commandLoadingRef.current = true;
-		try {
-			await ensureDraftRuntime();
-			const result = await rpc<{ commands: PiCommand[] }>({
-				type: "get_commands",
+	const [fileSuggestions, setFileSuggestions] = useState<ComposerSuggestion[]>([]);
+	const timer = useRef<number | null>(null);
+	const sequence = useRef(0);
+	const load = useCallback(async () => { await ensureDraftRuntime(); return rpc<{ commands: PiCommand[] }>({ type: "get_commands" }); }, [ensureDraftRuntime, rpc]);
+	const catalog = usePiCommandCatalog({ scopeKey: activeProjectId, load, readOnly });
+	const handleSuggestionTrigger = useCallback((trigger: "@" | "/" | null, query: string) => {
+		const request = ++sequence.current;
+		if (timer.current !== null) { window.clearTimeout(timer.current); timer.current = null; }
+		if (trigger === "/") { setFileSuggestions([]); void catalog.loadCommands(); return; }
+		if (trigger !== "@" || !client || !activeProjectId || readOnly) { setFileSuggestions([]); return; }
+		const normalized = query.trim();
+		timer.current = window.setTimeout(() => {
+			timer.current = null;
+			void client.searchFiles(activeProjectId, normalized).then((paths) => {
+				if (sequence.current === request) setFileSuggestions(createFileSuggestions(paths, normalized));
+			}).catch((error) => {
+				if (sequence.current !== request) return;
+				console.warn("Failed to load remote file suggestions", error); setFileSuggestions([]);
 			});
-			extensionCommandNamesRef.current = createPiExtensionCommandNames(
-				result.commands,
-			);
-			setCommandSuggestions(createPiCommandSuggestions(result.commands));
-			commandsLoadedRef.current = true;
-		} catch (error) {
-			console.warn("Failed to load Pi commands for remote composer", error);
-		} finally {
-			commandLoadingRef.current = false;
-		}
-	}, [ensureDraftRuntime, readOnly, rpc]);
-
-	// Resolve the extension command set for `/name` submissions, loading it on demand.
-	// Returns null when the command catalog cannot be fetched.
-	const loadExtensionCommandNames = useCallback(async () => {
-		if (commandsLoadedRef.current) return extensionCommandNamesRef.current;
-		try {
-			await ensureDraftRuntime();
-			const result = await rpc<{ commands: PiCommand[] }>({
-				type: "get_commands",
-			});
-			extensionCommandNamesRef.current = createPiExtensionCommandNames(
-				result.commands,
-			);
-			setCommandSuggestions(createPiCommandSuggestions(result.commands));
-			commandsLoadedRef.current = true;
-			return extensionCommandNamesRef.current;
-		} catch {
-			return null;
-		}
-	}, [ensureDraftRuntime, rpc]);
-
-	const handleSuggestionTrigger = useCallback(
-		(trigger: "@" | "/" | null, query: string) => {
-			fileSuggestionRequestRef.current += 1;
-			const requestId = fileSuggestionRequestRef.current;
-			if (fileSuggestionTimerRef.current !== null) {
-				window.clearTimeout(fileSuggestionTimerRef.current);
-				fileSuggestionTimerRef.current = null;
-			}
-			if (trigger === "/") {
-				setFileSuggestions([]);
-				void loadCommands();
-				return;
-			}
-			if (trigger !== "@" || !client || !activeProjectId) {
-				setFileSuggestions([]);
-				return;
-			}
-			const normalizedQuery = query.trim();
-			fileSuggestionTimerRef.current = window.setTimeout(() => {
-				fileSuggestionTimerRef.current = null;
-				void client
-					.searchFiles(activeProjectId, normalizedQuery)
-					.then((paths) => {
-						if (fileSuggestionRequestRef.current !== requestId) return;
-						setFileSuggestions(createFileSuggestions(paths, normalizedQuery));
-					})
-					.catch((error) => {
-						if (fileSuggestionRequestRef.current !== requestId) return;
-						console.warn("Failed to load remote file suggestions", error);
-						setFileSuggestions([]);
-					});
-			}, 120);
-		},
-		[activeProjectId, client, loadCommands],
-	);
-
-	useEffect(
-		() => () => {
-			fileSuggestionRequestRef.current += 1;
-			if (fileSuggestionTimerRef.current !== null) {
-				window.clearTimeout(fileSuggestionTimerRef.current);
-			}
-		},
-		[],
-	);
-
-	const composerSuggestions = useMemo(
-		() => [
-			...fileSuggestions,
-			...piSessionSuggestions(t),
-			...commandSuggestions,
-		],
-		[commandSuggestions, fileSuggestions, t],
-	);
-
-	return {
-		composerSuggestions,
-		handleSuggestionTrigger,
-		loadExtensionCommandNames,
-	};
+		}, 120);
+	}, [activeProjectId, client, catalog.loadCommands, readOnly]);
+	useEffect(() => () => { sequence.current += 1; if (timer.current !== null) window.clearTimeout(timer.current); }, [activeProjectId]);
+	const composerSuggestions = useMemo(() => [...fileSuggestions, ...piSessionSuggestions(t), ...catalog.commandSuggestions], [catalog.commandSuggestions, fileSuggestions, t]);
+	return { composerSuggestions, handleSuggestionTrigger, loadExtensionCommandNames: catalog.loadExtensionCommandNames };
 }
