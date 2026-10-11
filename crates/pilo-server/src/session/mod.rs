@@ -1,4 +1,5 @@
 mod activity;
+mod discovery;
 mod index;
 mod io;
 mod search;

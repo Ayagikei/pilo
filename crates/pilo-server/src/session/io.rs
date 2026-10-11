@@ -5,7 +5,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::agent_dir;
-use crate::to_value;
 
 #[derive(Deserialize)]
 pub(crate) struct SessionReadParams {
@@ -78,8 +77,7 @@ pub(crate) fn session_read(params: SessionReadParams) -> Result<(Value, Vec<u8>)
     ))
 }
 
-/// Delete a Pi session using the same policy as Pi's interactive session selector:
-/// prefer the optional `trash` CLI, then fall back to permanent file removal.
+/// Follow Pi's deletion policy: prefer trash, then unlink.
 pub(crate) fn session_delete(params: SessionDeleteParams) -> Result<Value, String> {
     let path = checked_session_file(&params.path)?;
     let mut trash = Command::new("trash");
@@ -90,44 +88,11 @@ pub(crate) fn session_delete(params: SessionDeleteParams) -> Result<Value, Strin
     if trash_status.is_ok_and(|status| status.success()) || !path.exists() {
         return Ok(json!({ "method": "trash" }));
     }
-
     std::fs::remove_file(&path)
         .map_err(|error| format!("failed to delete session '{}': {error}", path.display()))?;
     Ok(json!({ "method": "unlink" }))
 }
 
 pub(crate) fn session_discover() -> Result<Value, String> {
-    let Some(root) = agent_dir().map(|root| root.join("sessions")) else {
-        return to_value(Vec::<Value>::new());
-    };
-    let mut headers = Vec::new();
-    let Ok(projects) = std::fs::read_dir(root) else {
-        return to_value(headers);
-    };
-    'outer: for project in projects.flatten() {
-        let Ok(files) = std::fs::read_dir(project.path()) else {
-            continue;
-        };
-        for entry in files.flatten() {
-            if headers.len() >= 500 {
-                break 'outer;
-            }
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Ok(file) = std::fs::File::open(path) else {
-                continue;
-            };
-            let mut reader = std::io::BufReader::new(file);
-            let mut line = String::new();
-            use std::io::BufRead as _;
-            if reader.read_line(&mut line).is_ok()
-                && let Ok(value) = serde_json::from_str::<Value>(line.trim())
-            {
-                headers.push(value);
-            }
-        }
-    }
-    to_value(headers)
+    super::discovery::discover()
 }

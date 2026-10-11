@@ -16,7 +16,8 @@ use runtime::{
         connection_shown_in_home_set, local_connection_get, local_connection_test,
         local_pick_project_directory, parallel_agent_create, parallel_agent_list,
         parallel_agent_remove, parallel_agent_send, parallel_agent_stop, project_add,
-        project_discover, project_fs_mkdir, project_fs_read_dir, project_fs_read_file,
+        project_discover, project_discover_report, project_import,
+        project_fs_mkdir, project_fs_read_dir, project_fs_read_file,
         project_fs_remove, project_fs_rename, project_fs_search, project_fs_stat,
         project_fs_write_file, project_git_diff, project_git_status, project_list,
         project_mcp_server_approve, project_model_cache_list, project_model_cache_set,
@@ -158,6 +159,8 @@ pub fn run() {
             project_reorder,
             project_remove,
             project_discover,
+            project_discover_report,
+            project_import,
             project_git_status,
             project_git_diff,
             project_terminal_open,
@@ -255,6 +258,7 @@ pub fn run() {
                 let mut seen_connections = std::collections::HashSet::new();
                 for connection in projects
                     .into_iter()
+                    .filter(|project| project.last_opened_at_ms > 0)
                     .map(|project| project.connection)
                     .filter(|connection| seen_connections.insert(connection.id.clone()))
                 {
@@ -317,14 +321,9 @@ pub fn run() {
                         log::warn!(target: "shutdown", "graceful shutdown timed out; forcing exit");
                     }
                     // macOS 只有在事件循环正常退出时才会通知 LaunchServices/Dock
-                    // 注销应用；从工作线程直接 `std::process::exit` 会让 Dock 残留图标
-                    // （表现为「退出后仍在后台运行」）。让 Tauri 走一遍 `RunEvent::Exit`
-                    // 的正规退出流程：`exit(0)` 产生的是 `code = Some(0)`，上面的
-                    // `prevent_exit` 分支不会再拦截，事件循环随即退出并触发清理。
-                    log::info!(target: "shutdown", "exiting process");
+                    // 注销应用；从工作线程直接 `std::process::exit` 会让 Dock 残留图标。
                     handle.exit(0);
-                    // Windows release 下 `RequestExit` 消息偶发不被处理（见上方注释），
-                    // 兜底强制退出，避免残留进程。
+                    // Windows 兜底强制退出，避免残留进程。
                     std::thread::sleep(std::time::Duration::from_millis(1500));
                     log::warn!(target: "shutdown", "exit request not processed; forcing exit");
                     std::process::exit(0);

@@ -17,18 +17,14 @@ import {
 } from "@/lib/projects";
 import type { Connection } from "@/lib/pi-runtime";
 
-export function useAppCatalog(
-	onProjectsLoaded?: (projects: Project[]) => void,
-) {
+export function useAppCatalog(onProjectsLoaded?: (projects: Project[]) => void) {
 	const [projects, setProjects] = useState<Project[]>([]);
 	const [projectsReady, setProjectsReady] = useState(false);
 	const [connectionCatalog, setConnectionCatalog] = useState<Connection[]>([]);
 	const [connectionsReady, setConnectionsReady] = useState(false);
 
 	useEffect(() => {
-		void hydrateProjectPiModels().catch((error) => {
-			console.warn("Failed to hydrate Pi model cache", error);
-		});
+		void hydrateProjectPiModels().catch((error) => console.warn("Failed to hydrate Pi model cache", error));
 	}, []);
 
 	useEffect(() => {
@@ -36,15 +32,9 @@ export function useAppCatalog(
 		const load = async () => {
 			try {
 				const next = await listProjects();
-				if (active) {
-					setProjects(next);
-					onProjectsLoaded?.(next);
-				}
-			} catch (error) {
-				console.error("Failed to load projects", error);
-			} finally {
-				if (active) setProjectsReady(true);
-			}
+				if (active) { setProjects(next); onProjectsLoaded?.(next); }
+			} catch (error) { console.error("Failed to load projects", error); }
+			finally { if (active) setProjectsReady(true); }
 		};
 		void load();
 		const handleChanged = () => void load();
@@ -60,109 +50,63 @@ export function useAppCatalog(
 	useEffect(() => {
 		let active = true;
 		const load = async () => {
-			try {
-				const next = await listConnectionCatalog();
-				if (active) setConnectionCatalog(next);
-			} catch (error) {
-				console.error("Failed to load connections", error);
-			} finally {
-				if (active) setConnectionsReady(true);
-			}
+			try { const next = await listConnectionCatalog(); if (active) setConnectionCatalog(next); }
+			catch (error) { console.error("Failed to load connections", error); }
+			finally { if (active) setConnectionsReady(true); }
 		};
 		void load();
 		const handleChanged = () => void load();
 		window.addEventListener(CONNECTIONS_CHANGED_EVENT, handleChanged);
-		return () => {
-			active = false;
-			window.removeEventListener(CONNECTIONS_CHANGED_EVENT, handleChanged);
-		};
+		return () => { active = false; window.removeEventListener(CONNECTIONS_CHANGED_EVENT, handleChanged); };
 	}, []);
 
+	// An imported project is only registered. Opening it explicitly sets this time.
+	const openedProjects = useMemo(() => projects.filter((project) => project.lastOpenedAtMs > 0), [projects]);
 	useEffect(() => {
-		if (projects.length === 0) return;
+		if (openedProjects.length === 0) return;
+		let active = true;
 		const timer = window.setTimeout(() => {
-			void hydrateProjectPiModels()
-				.then(() => {
-					const staleProjectIds = projects
-						.filter((project) => {
-							const cached = getCachedProjectPiModels(project.id);
-							return !cached || isProjectPiModelsStale(cached);
-						})
-						.map((project) => project.id);
-					if (staleProjectIds.length > 0) {
-						void refreshAllProjectPiModels(staleProjectIds);
-					}
-				})
-				.catch((error) =>
-					console.warn("Failed to schedule Pi model refresh", error),
-				);
+			void hydrateProjectPiModels().then(() => {
+				if (!active) return;
+				const ids = openedProjects.filter((project) => {
+					const cached = getCachedProjectPiModels(project.id);
+					return !cached || isProjectPiModelsStale(cached);
+				}).map((project) => project.id);
+				if (ids.length > 0) void refreshAllProjectPiModels(ids);
+			}).catch((error) => console.warn("Failed to schedule Pi model refresh", error));
 		}, 15_000);
-		return () => window.clearTimeout(timer);
-	}, [projects]);
+		return () => { active = false; window.clearTimeout(timer); };
+	}, [openedProjects]);
 
 	useEffect(() => {
-		if (projects.length === 0) return;
-		const timer = window.setInterval(
-			() => {
-				void refreshAllProjectPiModels(projects.map((project) => project.id));
-			},
-			60 * 60 * 1000,
-		);
+		if (openedProjects.length === 0) return;
+		const timer = window.setInterval(() => {
+			void refreshAllProjectPiModels(openedProjects.map((project) => project.id));
+		}, 60 * 60 * 1000);
 		return () => window.clearInterval(timer);
-	}, [projects]);
+	}, [openedProjects]);
 
 	const envs = useMemo(() => {
 		const byId = new Map<string, { id: string; name: string }>();
 		for (const connection of connectionCatalog) {
 			if (!connection.shownInHome) continue;
-			byId.set(connection.id, {
-				id: connection.id,
-				name: connectionLabel(connection),
-			});
+			byId.set(connection.id, { id: connection.id, name: connectionLabel(connection) });
 		}
 		const list = [...byId.values()];
-		list.sort((a, b) => (a.id === "local" ? -1 : b.id === "local" ? 1 : 0));
+		list.sort((a, b) => a.id === "local" ? -1 : b.id === "local" ? 1 : 0);
 		return list;
 	}, [connectionCatalog]);
-
-	// 主页（侧边栏可见连接）下展示的项目。输入框上方的项目切换只应列出这些项目。
 	const homeProjects = useMemo(() => {
 		const visible = new Set(envs.map((env) => env.id));
 		return projects.filter((project) => visible.has(project.connection.id));
 	}, [envs, projects]);
+	const sidebarProjects = useMemo(() => projects.map((project) => ({
+		id: project.id, name: project.name, path: project.metadata.cwd,
+		envId: project.connection.id, connectionType: project.connection.kind.type,
+	})), [projects]);
+	const firstProject = useMemo(() => connectionsReady ? firstProjectInConnectionOrder(
+		homeProjects.filter((project) => project.lastOpenedAtMs > 0), envs.map((env) => env.id),
+	) : null, [connectionsReady, envs, homeProjects]);
 
-	const sidebarProjects = useMemo(
-		() =>
-			projects.map((project) => ({
-				id: project.id,
-				name: project.name,
-				path: project.metadata.cwd,
-				envId: project.connection.id,
-				connectionType: project.connection.kind.type,
-			})),
-		[projects],
-	);
-
-	const firstProject = useMemo(
-		() =>
-			connectionsReady
-				? firstProjectInConnectionOrder(
-						homeProjects,
-						envs.map((env) => env.id),
-					)
-				: null,
-		[connectionsReady, envs, homeProjects],
-	);
-
-	return {
-		projects,
-		setProjects,
-		projectsReady,
-		connectionCatalog,
-		connectionsReady,
-		envs,
-		homeProjects,
-		sidebarProjects,
-		firstProject,
-	};
+	return { projects, setProjects, projectsReady, connectionCatalog, connectionsReady, envs, homeProjects, sidebarProjects, firstProject };
 }

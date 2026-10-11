@@ -1,5 +1,6 @@
 mod appearance;
 mod connections;
+mod project_discovery;
 mod projects;
 mod remote;
 mod runtime;
@@ -15,6 +16,7 @@ pub use connections::{
     ssh_connection_test_draft, wsl_connection_list, wsl_connection_remove, wsl_connection_save,
     wsl_connection_test, wsl_list_distributions,
 };
+pub use project_discovery::{project_discover_report, project_import};
 pub use projects::{
     connection_fs_read_dir, local_pick_project_directory, parallel_agent_create,
     parallel_agent_list, parallel_agent_remove, parallel_agent_send, parallel_agent_stop,
