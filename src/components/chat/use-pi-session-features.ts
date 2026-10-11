@@ -47,7 +47,13 @@ export function usePiSessionFeatures(options: Parameters<typeof useCoreFeatures>
 		if (readOnly || !command.startsWith("/")) return false;
 		const name = command.slice(1).split(/\s+/, 1)[0];
 		const names = await catalog.loadExtensionCommandNames();
-		if (!names?.has(name)) return false;
+		if (names === null) {
+			// Do not silently send a possible extension command to the model when
+			// the command catalog could not be verified. The user may retry explicitly.
+			toast.error(t("chat.readCommandsFailed"));
+			return true;
+		}
+		if (!names.has(name)) return false;
 		try {
 			await client.executePiCommand(command);
 			void onRefreshSessionState().catch(() => undefined);
