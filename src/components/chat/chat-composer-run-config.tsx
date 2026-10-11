@@ -1,23 +1,31 @@
-import { type ComponentPropsWithoutRef, useEffect, useState } from "react";
+import { type ComponentPropsWithoutRef, useEffect, useMemo, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Check, RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { CHAT_COMPOSER_RUN_CONFIG_TRIGGER_CLASS_NAME } from "@/components/chat/chat-composer-frame";
 import { PiLogo } from "@/components/pi-logo";
+import { workspaceCopy } from "@/i18n/workspace-enhancements";
+import {
+	filterPiModels,
+	isScopedPiModel,
+	parsePiModelListScope,
+	piScopeAvailability,
+	type PiModelListScope,
+} from "@/lib/pi-model-filter";
 import type { PiModel, PiThinkingLevel } from "@/lib/pi-runtime";
 import { cn } from "@/lib/utils";
 import {
-	DropdownMenu,
-	DropdownMenuContent,
-	DropdownMenuItem,
-	DropdownMenuSeparator,
-	DropdownMenuSub,
-	DropdownMenuSubContent,
-	DropdownMenuSubTrigger,
-	DropdownMenuTrigger,
+	Button,
+	Popover,
+	PopoverContent,
+	PopoverTrigger,
 	Spinner,
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
 } from "@/ui";
+import { Command, CommandInput, CommandItem, CommandList } from "@/ui/command";
 
 const THINKING_LEVEL_LABELS: Record<PiThinkingLevel, string> = {
 	off: "Off",
@@ -29,20 +37,9 @@ const THINKING_LEVEL_LABELS: Record<PiThinkingLevel, string> = {
 	max: "Max",
 };
 
-function thinkingLevelLabel(level: PiThinkingLevel | null) {
-	return level ? THINKING_LEVEL_LABELS[level] : "—";
-}
-
-function modelValue(model: PiModel) {
-	return JSON.stringify([model.provider, model.id]);
-}
-
-// 触屏（无 hover、粗指针）走底部抽屉，桌面鼠标走嵌套下拉，两者都内联在底栏。
-// ponytail: matchMedia 探测而非 prop 透传，ChatComposer 调用方零改动。
 export function useIsTouchDevice() {
 	const [touch, setTouch] = useState(
-		() =>
-			typeof window !== "undefined" &&
+		() => typeof window !== "undefined" &&
 			window.matchMedia("(hover: none) and (pointer: coarse)").matches,
 	);
 	useEffect(() => {
@@ -60,6 +57,8 @@ type ComposerRunConfigProps = {
 	modelLoading: boolean;
 	modelError: string | null;
 	modelDisabled: boolean;
+	/** Stable project/connection identity; a UI preference, never a Pi setting. */
+	modelScopeKey?: string | null;
 	onModelMenuOpen?: () => void;
 	onModelRefresh?: () => void;
 	onModelChange?: (model: PiModel | null) => void;
@@ -71,397 +70,187 @@ type ComposerRunConfigProps = {
 	onThinkingChange?: (level: PiThinkingLevel | null) => void;
 };
 
-export function ComposerRunConfig(props: ComposerRunConfigProps) {
-	const isTouch = useIsTouchDevice();
-	return isTouch ? (
-		<TouchRunConfigSheet {...props} />
-	) : (
-		<DesktopRunConfigMenu {...props} />
-	);
-}
-
-// 既被触屏抽屉当作普通按钮用，也被桌面 DropdownMenuTrigger asChild 包裹。
-// 后者靠 onPointerDown 开合，必须把 Slot 合并进来的 props（含 ref）透传到按钮上。
 type RunConfigTriggerProps = {
 	label: string;
 	thinking: string;
-	loading?: boolean;
 } & Omit<ComponentPropsWithoutRef<"button">, "children" | "className" | "type">;
 
-function RunConfigTrigger({
-	label,
-	thinking,
-	loading,
-	...buttonProps
-}: RunConfigTriggerProps) {
+function RunConfigTrigger({ label, thinking, ...buttonProps }: RunConfigTriggerProps) {
 	const { t } = useTranslation();
 	return (
 		<button
 			{...buttonProps}
 			data-chat-run-config-trigger=""
 			type="button"
-			aria-label={t("chat.runConfigLabel", {
-				model: label,
-				thinking,
-			})}
+			aria-label={t("chat.runConfigLabel", { model: label, thinking })}
 			className={CHAT_COMPOSER_RUN_CONFIG_TRIGGER_CLASS_NAME}
 		>
 			<PiLogo className="size-4 text-current" />
-			{loading ? <Spinner className="size-3.5 shrink-0" /> : null}
 			<span className="block min-w-0 max-w-40 truncate text-left">{label}</span>
-			<span aria-hidden="true" className="shrink-0 text-muted-foreground/60">
-				·
-			</span>
+			<span aria-hidden="true" className="shrink-0 text-muted-foreground/60">·</span>
 			<span className="shrink-0">{thinking}</span>
 		</button>
 	);
 }
 
-// ---- 桌面：原有嵌套下拉（与既有实现一致） ------------------------------
-
-function DesktopRunConfigMenu({
-	models,
-	selectedModel,
-	modelLoading,
-	modelError,
-	modelDisabled,
-	onModelMenuOpen,
-	onModelRefresh,
-	onModelChange,
-	thinkingLevels,
-	selectedThinkingLevel,
-	thinkingLoading,
-	thinkingDisabled,
-	onThinkingMenuOpen,
-	onThinkingChange,
-}: ComposerRunConfigProps) {
-	const { t } = useTranslation();
-	const effectiveModelLabel = selectedModel?.name || selectedModel?.id || "—";
-	const selectedModelValue = selectedModel ? modelValue(selectedModel) : "";
-	const selectedThinkingValue = selectedThinkingLevel ?? "";
-	const effectiveThinkingLabel = thinkingLevelLabel(selectedThinkingLevel);
-	const renderModelItems = (items: readonly PiModel[]) =>
-		items.map((model) => {
-			const optionValue = modelValue(model);
-			return (
-				<DropdownMenuItem
-					key={optionValue}
-					onSelect={(event) => {
-						event.preventDefault();
-						onModelChange?.(model);
-					}}
-					className="gap-2"
-				>
-					<span className="min-w-0 flex-1 truncate">
-						{model.name || model.id}
-					</span>
-					<span className="shrink-0 text-xs text-muted-foreground">
-						{model.provider}
-					</span>
-					{selectedModelValue === optionValue ? (
-						<Check className="size-3.5 shrink-0 opacity-70" />
-					) : null}
-				</DropdownMenuItem>
-			);
-		});
-	const disabled =
-		(modelDisabled || !onModelChange) &&
-		(thinkingDisabled || !onThinkingChange);
-
-	return (
-		<DropdownMenu
-			onOpenChange={(open) => {
-				if (!open) return;
-				onModelMenuOpen?.();
-				onThinkingMenuOpen?.();
-			}}
-		>
-			<DropdownMenuTrigger asChild>
-				<RunConfigTrigger
-					label={effectiveModelLabel}
-					thinking={effectiveThinkingLabel}
-					disabled={disabled}
-				/>
-			</DropdownMenuTrigger>
-			<DropdownMenuContent align="start" className="min-w-56">
-				<DropdownMenuSub>
-					<DropdownMenuSubTrigger
-						className="pr-1.5"
-						disabled={modelDisabled || !onModelChange}
-					>
-						<span className="min-w-0 flex-1 truncate">{t("chat.model")}</span>
-						<span className="ml-4 max-w-40 truncate text-xs text-muted-foreground">
-							{modelLoading ? t("chat.loadingModels") : effectiveModelLabel}
-						</span>
-					</DropdownMenuSubTrigger>
-					<DropdownMenuSubContent className="w-72 max-w-[calc(100vw-2rem)] overflow-hidden">
-						<DropdownMenuItem
-							onSelect={(event) => {
-								event.preventDefault();
-								onModelRefresh?.();
-							}}
-							disabled={!onModelRefresh || modelLoading}
-							className="gap-2"
-						>
-							{modelLoading ? (
-								<Spinner className="size-3.5" />
-							) : (
-								<RefreshCw className="size-3.5" />
-							)}
-							{t("chat.refreshModels")}
-						</DropdownMenuItem>
-						<DropdownMenuSeparator />
-						<div className="max-h-[min(20rem,calc(70vh-3rem))] overflow-y-auto overscroll-contain [scrollbar-gutter:stable]">
-							{modelError ? (
-								<DropdownMenuItem disabled>
-									<span className="min-w-0 flex-1 truncate text-destructive">
-										{modelError}
-									</span>
-								</DropdownMenuItem>
-							) : null}
-							{models.length === 0 ? (
-								<DropdownMenuItem disabled>
-									{modelLoading ? t("chat.readingModels") : t("chat.noModels")}
-								</DropdownMenuItem>
-							) : (
-								renderModelItems(models)
-							)}
-						</div>
-					</DropdownMenuSubContent>
-				</DropdownMenuSub>
-
-				<DropdownMenuSub>
-					<DropdownMenuSubTrigger
-						className="pr-1.5"
-						disabled={thinkingDisabled || !onThinkingChange}
-					>
-						<span className="min-w-0 flex-1 truncate">
-							{t("chat.reasoning")}
-						</span>
-						<span className="ml-4 max-w-40 truncate text-xs text-muted-foreground">
-							{thinkingLoading
-								? t("chat.loadingModels")
-								: effectiveThinkingLabel}
-						</span>
-					</DropdownMenuSubTrigger>
-					<DropdownMenuSubContent className="min-w-40">
-						{thinkingLoading ? (
-							<DropdownMenuItem disabled>
-								{t("chat.readingReasoning")}
-							</DropdownMenuItem>
-						) : thinkingLevels.length === 0 ? (
-							<DropdownMenuItem disabled>
-								{t("chat.noReasoning")}
-							</DropdownMenuItem>
-						) : (
-							<>
-								{thinkingLevels.map((level) => (
-									<DropdownMenuItem
-										key={level}
-										onSelect={(event) => {
-											event.preventDefault();
-											onThinkingChange?.(level);
-										}}
-										className="justify-between"
-									>
-										<span>{thinkingLevelLabel(level)}</span>
-										{selectedThinkingValue === level ? (
-											<Check className="size-3.5 opacity-70" />
-										) : null}
-									</DropdownMenuItem>
-								))}
-							</>
-						)}
-					</DropdownMenuSubContent>
-				</DropdownMenuSub>
-			</DropdownMenuContent>
-		</DropdownMenu>
-	);
+function readScope(key: string | null | undefined): PiModelListScope | null {
+	if (!key || typeof window === "undefined") return null;
+	try {
+		return parsePiModelListScope(window.localStorage.getItem(`pilo:model-scope:${key}`));
+	} catch {
+		return null;
+	}
 }
 
-// ---- 触屏：底部抽屉，选完保持打开，点空白处关闭 ----------------------
-
-function TouchRunConfigSheet({
-	models,
-	selectedModel,
-	modelLoading,
-	modelError,
-	modelDisabled,
-	onModelMenuOpen,
-	onModelRefresh,
-	onModelChange,
-	thinkingLevels,
-	selectedThinkingLevel,
-	thinkingLoading,
-	thinkingDisabled,
-	onThinkingMenuOpen,
-	onThinkingChange,
-}: ComposerRunConfigProps) {
-	const { t } = useTranslation();
-	const [open, setOpen] = useState(false);
-	const effectiveModelLabel = selectedModel?.name || selectedModel?.id || "—";
-	const effectiveThinkingLabel = thinkingLevelLabel(selectedThinkingLevel);
-	const selectedModelValue = selectedModel ? modelValue(selectedModel) : "";
-	const disabled =
-		(modelDisabled || !onModelChange) &&
-		(thinkingDisabled || !onThinkingChange);
-	const modelSectionDisabled = modelDisabled || !onModelChange;
-	const thinkingSectionDisabled = thinkingDisabled || !onThinkingChange;
-
-	const openSheet = () => {
-		setOpen(true);
-		onModelMenuOpen?.();
-		onThinkingMenuOpen?.();
+function RunConfigContent(props: ComposerRunConfigProps & { touch: boolean }) {
+	const { t, i18n } = useTranslation();
+	const copy = workspaceCopy(i18n.language);
+	const [query, setQuery] = useState("");
+	const [choice, setChoice] = useState(() => readScope(props.modelScopeKey));
+	const availability = piScopeAvailability(props.models);
+	const scope = choice ?? (availability === "available" ? "scoped" : "all");
+	const models = useMemo(
+		() => filterPiModels(props.models, scope, query),
+		[props.models, scope, query],
+	);
+	const scopedCount = props.models.filter(isScopedPiModel).length;
+	const selectScope = (next: PiModelListScope) => {
+		setChoice(next);
+		if (!props.modelScopeKey) return;
+		try {
+			window.localStorage.setItem(`pilo:model-scope:${props.modelScopeKey}`, next);
+		} catch {
+			// Storage can be unavailable in private browser sessions.
+		}
 	};
 
 	return (
-		<DialogPrimitive.Root open={open} onOpenChange={setOpen}>
-			<RunConfigTrigger
-				label={effectiveModelLabel}
-				thinking={effectiveThinkingLabel}
-				disabled={disabled}
-				aria-label={t("chat.runConfigLabel", {
-					model: effectiveModelLabel,
-					thinking: effectiveThinkingLabel,
-				})}
-				onClick={openSheet}
-			/>
-			<DialogPrimitive.Portal>
-				<DialogPrimitive.Overlay className="fixed inset-0 z-[var(--z-dialog-overlay)] bg-black/40 duration-200 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
-				<DialogPrimitive.Content
-					className={cn(
-						"fixed inset-x-0 bottom-0 z-[var(--z-dialog)] mx-auto flex max-h-[85dvh] w-full max-w-lg flex-col rounded-t-2xl border-t border-border/70 bg-background pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-popover outline-none",
-						"duration-200 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0",
-						"motion-safe:data-[state=closed]:slide-out-to-bottom motion-safe:data-[state=open]:slide-in-from-bottom",
-					)}
-				>
-					<DialogPrimitive.Title className="sr-only">
-						{t("chat.runConfigLabel", {
-							model: effectiveModelLabel,
-							thinking: effectiveThinkingLabel,
-						})}
-					</DialogPrimitive.Title>
-					<DialogPrimitive.Description className="sr-only">
-						{t("chat.model")} · {t("chat.reasoning")}
-					</DialogPrimitive.Description>
-
-					{/* 拖拽提示条：点按关闭，符合底部抽屉惯例 */}
-					<button
-						type="button"
-						aria-label={t("common.close")}
-						className="flex w-full justify-center pt-2.5"
-						onClick={() => setOpen(false)}
-					>
-						<span className="h-1 w-10 rounded-full bg-muted-foreground/30" />
-					</button>
-
-					{/* 模型 */}
-					<div className="flex items-center gap-2 px-4 pb-1 pt-2">
-						<span className="text-2xs font-semibold uppercase leading-tight tracking-[0.6px] text-muted-foreground">
-							{t("chat.model")}
-						</span>
-						<span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-							{modelLoading ? t("chat.loadingModels") : effectiveModelLabel}
-						</span>
-						<button
-							type="button"
-							disabled={!onModelRefresh || modelLoading}
-							aria-label={t("chat.refreshModels")}
-							className="flex size-9 items-center justify-center rounded-lg text-muted-foreground transition-colors active:bg-muted disabled:opacity-50"
-							onClick={() => onModelRefresh?.()}
-						>
-							{modelLoading ? (
-								<Spinner className="size-4" />
-							) : (
-								<RefreshCw className="size-4" />
-							)}
-						</button>
-					</div>
-					<div className="max-h-[40dvh] overflow-y-auto overscroll-contain px-2">
-						{modelError ? (
-							<p className="px-2 py-2 text-sm text-destructive">{modelError}</p>
-						) : models.length === 0 ? (
-							<p className="px-2 py-3 text-sm text-muted-foreground">
-								{modelLoading ? t("chat.readingModels") : t("chat.noModels")}
-							</p>
-						) : (
-							models.map((model) => {
-								const optionValue = modelValue(model);
-								return (
-									<button
-										key={optionValue}
-										type="button"
-										disabled={modelSectionDisabled}
-										className={cn(
-											"flex min-h-11 w-full items-center gap-2 rounded-lg px-2 text-start text-sm transition-colors active:bg-muted disabled:opacity-50",
-											selectedModelValue === optionValue && "bg-muted",
-										)}
-										onClick={() => {
-											onModelChange?.(model);
-										}}
-									>
-										<span className="min-w-0 flex-1 truncate">
-											{model.name || model.id}
-										</span>
-										<span className="shrink-0 text-xs text-muted-foreground">
-											{model.provider}
-										</span>
-										{selectedModelValue === optionValue ? (
-											<Check className="size-4 shrink-0 opacity-70" />
-										) : null}
-									</button>
-								);
-							})
-						)}
-					</div>
-
-					{/* 推理 */}
-					<div className="mt-2 border-t border-border/60 px-4 pb-1 pt-3">
-						<div className="flex items-center gap-2">
-							<span className="text-2xs font-semibold uppercase leading-tight tracking-[0.6px] text-muted-foreground">
-								{t("chat.reasoning")}
+		<div className="flex min-h-0 flex-col">
+			<Command shouldFilter={false} loop className="min-h-0 bg-transparent">
+				<div className="flex items-center border-b px-1">
+					<CommandInput
+						value={query}
+						onValueChange={setQuery}
+						aria-label={copy.searchModels}
+						placeholder={copy.searchModels}
+						wrapperClassName="h-11 min-w-0 flex-1 border-0 px-2"
+						onKeyDown={(event) => {
+							if (event.nativeEvent.isComposing || event.keyCode === 229) event.stopPropagation();
+						}}
+					/>
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<Button type="button" variant="ghost" size="icon"
+								className={props.touch ? "size-11 shrink-0" : "size-8 shrink-0"}
+								aria-label={t("chat.refreshModels")}
+								disabled={!props.onModelRefresh || props.modelLoading}
+								onKeyDown={(event) => event.stopPropagation()}
+								onClick={props.onModelRefresh}>
+								{props.modelLoading ? <Spinner className="size-4" /> : <RefreshCw className="size-4" />}
+							</Button>
+						</TooltipTrigger>
+						<TooltipContent>{t("chat.refreshModels")}</TooltipContent>
+					</Tooltip>
+				</div>
+				<div className="flex gap-1 border-b p-2" role="group" aria-label={copy.scopeHint}>
+					{(["scoped", "all"] as const).map((value) => (
+						<Button key={value} type="button" size="sm"
+							variant={scope === value ? "secondary" : "ghost"}
+							className={props.touch ? "min-h-11" : undefined}
+							aria-pressed={scope === value} title={copy.scopeHint}
+							onKeyDown={(event) => event.stopPropagation()}
+							onClick={() => selectScope(value)}>
+							{copy[value]} · {value === "scoped" ? scopedCount : props.models.length}
+						</Button>
+					))}
+				</div>
+				{props.modelError ? <p role="alert" className="break-words px-3 py-2 text-xs text-destructive">{props.modelError}</p> : null}
+				<CommandList aria-label={t("chat.model")}>
+					{models.length === 0 ? (
+						<div role="status" className="space-y-2 px-3 py-5 text-center text-sm text-muted-foreground">
+							<p>{props.modelLoading && props.models.length === 0 ? t("chat.readingModels")
+								: scope === "scoped" && availability !== "available"
+									? availability === "unknown" ? copy.scopeUnknown : copy.scopeEmpty
+									: query.trim() ? copy.noMatchingModels : t("chat.noModels")}</p>
+							{scope === "scoped" ? <Button type="button" size="sm" variant="outline" onKeyDown={(event) => event.stopPropagation()} onClick={() => selectScope("all")}>{copy.all}</Button> : null}
+						</div>
+					) : models.map((model) => (
+						<CommandItem key={JSON.stringify([model.provider, model.id])}
+							value={JSON.stringify([model.provider, model.id])}
+							disabled={props.modelDisabled || !props.onModelChange}
+							onSelect={() => props.onModelChange?.(model)}
+							className={cn("mx-1", props.touch && "min-h-11")}
+							title={`${model.name || model.id}\n${model.provider}/${model.id}`}>
+							<span className="min-w-0 flex-1">
+								<span className="block truncate">{model.name || model.id}</span>
+								<span className="block truncate text-xs text-muted-foreground">{model.provider} / {model.id}</span>
 							</span>
-							{thinkingLoading ? (
-								<span className="text-xs text-muted-foreground">
-									{t("chat.loadingModels")}
-								</span>
-							) : null}
-						</div>
-					</div>
-					{thinkingSectionDisabled && !thinkingLoading ? (
-						<p className="px-4 pb-2 pt-1 text-sm text-muted-foreground">
-							{t("chat.noReasoning")}
-						</p>
-					) : (
-						<div className="flex flex-wrap gap-1.5 px-3 pb-1 pt-1.5">
-							{thinkingLevels.map((level) => (
-								<button
-									key={level}
-									type="button"
-									disabled={thinkingSectionDisabled}
-									aria-pressed={selectedThinkingLevel === level}
-									className={cn(
-										"min-h-9 rounded-full px-3.5 text-sm transition-colors active:scale-[0.97] disabled:opacity-50",
-										selectedThinkingLevel === level
-											? "bg-foreground text-background"
-											: "bg-muted text-foreground",
-									)}
-									onClick={() => {
-										onThinkingChange?.(level);
-									}}
-								>
-									{thinkingLevelLabel(level)}
-								</button>
-							))}
-							{thinkingLevels.length === 0 && !thinkingLoading ? (
-								<p className="w-full px-1 py-2 text-sm text-muted-foreground">
-									{t("chat.noReasoning")}
-								</p>
-							) : null}
-						</div>
-					)}
-				</DialogPrimitive.Content>
-			</DialogPrimitive.Portal>
-		</DialogPrimitive.Root>
+							{props.selectedModel?.id === model.id && props.selectedModel.provider === model.provider ? <Check className="size-4 shrink-0" /> : null}
+						</CommandItem>
+					))}
+				</CommandList>
+			</Command>
+			<fieldset className="m-0 min-w-0 border-0 border-t border-solid border-border p-3"
+				disabled={props.thinkingDisabled || !props.onThinkingChange || props.thinkingLoading}>
+				<legend className="sr-only">{t("chat.reasoning")}</legend>
+				<p className="mb-2 text-xs text-muted-foreground">{t("chat.reasoning")}</p>
+				<div className="flex flex-wrap gap-1">
+					{props.thinkingLoading ? <Spinner className="size-4" /> : props.thinkingLevels.map((level) => (
+						<Button key={level} type="button" size="sm"
+							variant={props.selectedThinkingLevel === level ? "secondary" : "ghost"}
+							aria-pressed={props.selectedThinkingLevel === level}
+							className={props.touch ? "min-h-11" : undefined}
+							onClick={() => props.onThinkingChange?.(level)}>{THINKING_LEVEL_LABELS[level]}</Button>
+					))}
+					{!props.thinkingLoading && props.thinkingLevels.length === 0 ? <span className="text-xs text-muted-foreground">{t("chat.noReasoning")}</span> : null}
+				</div>
+			</fieldset>
+		</div>
+	);
+}
+
+export function ComposerRunConfig(props: ComposerRunConfigProps) {
+	const touch = useIsTouchDevice();
+	const [open, setOpen] = useState(false);
+	const { t, i18n } = useTranslation();
+	const copy = workspaceCopy(i18n.language);
+	const label = props.selectedModel?.name || props.selectedModel?.id || "—";
+	const thinking = props.selectedThinkingLevel ? THINKING_LEVEL_LABELS[props.selectedThinkingLevel] : "—";
+	const disabled = (props.modelDisabled || !props.onModelChange) &&
+		(props.thinkingDisabled || !props.onThinkingChange);
+	const onOpenChange = (next: boolean) => {
+		setOpen(next);
+		if (next) {
+			props.onModelMenuOpen?.();
+			props.onThinkingMenuOpen?.();
+		}
+	};
+	const trigger = <RunConfigTrigger label={label} thinking={thinking} disabled={disabled} />;
+	const content = <RunConfigContent key={props.modelScopeKey ?? "default"} {...props} touch={touch} />;
+	if (touch) {
+		return (
+			<DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
+				<DialogPrimitive.Trigger asChild>{trigger}</DialogPrimitive.Trigger>
+				<DialogPrimitive.Portal>
+					<DialogPrimitive.Overlay className="fixed inset-0 z-[var(--z-dialog-overlay)] bg-background/70" />
+					<DialogPrimitive.Content
+						onOpenAutoFocus={(event) => event.preventDefault()}
+						aria-describedby={undefined}
+						className="fixed inset-x-0 bottom-0 z-[var(--z-dialog)] mx-auto max-h-[85dvh] w-full max-w-lg overflow-y-auto rounded-t-2xl border bg-background pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-popover outline-none">
+						<DialogPrimitive.Title className="sr-only">{t("chat.runConfigLabel", { model: label, thinking })}</DialogPrimitive.Title>
+						{content}
+						<DialogPrimitive.Close asChild><Button type="button" variant="ghost" className="mx-3 min-h-11">{copy.close}</Button></DialogPrimitive.Close>
+					</DialogPrimitive.Content>
+				</DialogPrimitive.Portal>
+			</DialogPrimitive.Root>
+		);
+	}
+	return (
+		<Popover open={open} onOpenChange={onOpenChange}>
+			<PopoverTrigger asChild>{trigger}</PopoverTrigger>
+			<PopoverContent align="start" className="w-96 max-w-[calc(100vw-2rem)] overflow-hidden p-0">
+				{content}
+			</PopoverContent>
+		</Popover>
 	);
 }
