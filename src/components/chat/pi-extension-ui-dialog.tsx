@@ -1,240 +1,78 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { X } from "lucide-react";
 
-import { useIsTouchDevice } from "@/components/chat/chat-composer-run-config";
-import type { PiExtensionDialogRequest } from "@/components/chat/use-pi-session-features";
+import { useIsTouchDevice } from "./chat-composer-run-config";
+import { useChatWorkspaceScope } from "./chat-workspace-scope";
+import { workspaceCopy } from "@/i18n/workspace-enhancements";
+import { filterExtensionOptions, type ExtensionRequest, type ExtensionResponse } from "@/lib/pi-extension-ui-state";
 import { cn } from "@/lib/utils";
-import {
-	menuItemClassName,
-	menuSurfaceClassName,
-	menuSurfaceStyle,
-} from "@/ui/menu-styles";
+import { menuItemClassName, menuSurfaceClassName, menuSurfaceStyle } from "@/ui/menu-styles";
 import { Button, Input, Textarea } from "@/ui";
 
-type ExtensionResponse = {
-	value?: string;
-	confirmed?: boolean;
-	cancelled?: boolean;
-};
+type Props = { request: ExtensionRequest | null; onRespond: (response: ExtensionResponse) => void };
 
-type PiExtensionUiDialogProps = {
-	request: PiExtensionDialogRequest | null;
-	onRespond: (response: ExtensionResponse) => void;
-};
-
-function keyedOptions(options: readonly string[]) {
-	const counts = new Map<string, number>();
-	return options.map((option) => {
-		const count = counts.get(option) ?? 0;
-		counts.set(option, count + 1);
-		return { key: `${option}:${count}`, option };
-	});
-}
-
-function PiExtensionUiDialogContent({
-	request,
-	onRespond,
-}: {
-	request: PiExtensionDialogRequest;
-	onRespond: (response: ExtensionResponse) => void;
-}) {
+function Content({ request, onRespond }: { request: ExtensionRequest; onRespond: Props["onRespond"] }) {
+	const { t, i18n } = useTranslation();
+	const copy = workspaceCopy(i18n.language);
+	const touch = useIsTouchDevice();
+	const titleId = useId();
 	const [value, setValue] = useState(request.prefill ?? "");
-	const [activeIndex, setActiveIndex] = useState(0);
+	const [query, setQuery] = useState("");
 	const inputRef = useRef<HTMLInputElement>(null);
 	const editorRef = useRef<HTMLTextAreaElement>(null);
-	const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
-	const isTouch = useIsTouchDevice();
-	const { t } = useTranslation();
-	const title = request.title || "Pi Extension";
-	const options =
-		request.method === "select" ? keyedOptions(request.options) : [];
-	const cancel = useCallback(() => onRespond({ cancelled: true }), [onRespond]);
-
+	const searchRef = useRef<HTMLInputElement>(null);
+	const buttons = useRef<(HTMLButtonElement | null)[]>([]);
+	const options = useMemo(() => filterExtensionOptions(request.options, query), [request.options, query]);
 	useEffect(() => {
-		const handleKeyDown = (event: KeyboardEvent) => {
-			if (event.key !== "Escape") return;
-			event.preventDefault();
-			cancel();
-		};
-		document.addEventListener("keydown", handleKeyDown);
-		return () => document.removeEventListener("keydown", handleKeyDown);
-	}, [cancel]);
-
-	// 弹窗随 request.id 重挂载；按方法把焦点交给唯一可输入/可选的控件。
-	useEffect(() => {
-		if (isTouch) return;
+		if (touch) return;
 		if (request.method === "input") inputRef.current?.focus();
 		else if (request.method === "editor") editorRef.current?.focus();
-		else if (request.method === "select") optionRefs.current[0]?.focus();
-	}, [isTouch, request.method]);
-
-	const moveActive = (delta: number) => {
-		if (options.length === 0) return;
-		const next = (activeIndex + delta + options.length) % options.length;
-		setActiveIndex(next);
-		optionRefs.current[next]?.focus();
-	};
-
-	const handleSelectKeyDown = (event: React.KeyboardEvent) => {
-		if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-			event.preventDefault();
-			moveActive(event.key === "ArrowDown" ? 1 : -1);
-			return;
+		else if (request.method === "select") {
+			if (request.options.length > 8) searchRef.current?.focus();
+			else buttons.current[0]?.focus();
 		}
-		const numeric = Number.parseInt(event.key, 10);
-		if (numeric >= 1 && numeric <= options.length) {
-			event.preventDefault();
-			onRespond({ value: options[numeric - 1]?.option });
-		}
-	};
-
+	}, [request.method, request.options.length, touch]);
 	return (
-		<output
-			aria-live="polite"
-			className={cn(
-				menuSurfaceClassName,
-				"mb-2 block overflow-hidden p-0",
-				"animate-in fade-in-0 slide-in-from-bottom-1 duration-150",
-			)}
-			style={menuSurfaceStyle}
-		>
-			<div className="flex items-start gap-2.5 px-4 pb-2 pt-3">
-				<div className="min-w-0 flex-1">
-					<div className="truncate text-sm font-medium leading-6 text-foreground">
-						{title}
-					</div>
-					{request.message ? (
-						<div className="mt-0.5 whitespace-pre-wrap break-words text-xs leading-5 text-muted-foreground">
-							{request.message}
-						</div>
-					) : null}
-				</div>
-				<Button
-					type="button"
-					variant="ghost"
-					size="icon"
-					className={cn(
-						"shrink-0 rounded-lg text-muted-foreground hover:bg-hover hover:text-foreground",
-						isTouch ? "-mr-1.5 -mt-1 size-9" : "-mr-1.5 -mt-1 size-7",
-					)}
-					aria-label={t("common.cancel")}
-					onClick={cancel}
-				>
-					<X className={isTouch ? "size-4" : "size-3.5"} />
-				</Button>
+		<div role="dialog" aria-labelledby={titleId} className={cn(menuSurfaceClassName, "mb-2 overflow-hidden p-0")} style={menuSurfaceStyle}
+			onKeyDown={(event) => {
+				if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+				if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onRespond({ cancelled: true }); }
+			}}>
+			<div className="flex items-start gap-2 px-4 pb-2 pt-3">
+				<div className="min-w-0 flex-1"><h3 id={titleId} className="break-words text-sm font-medium">{request.title || "Pi Extension"}</h3>{request.message ? <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-muted-foreground">{request.message}</p> : null}</div>
+				<Button type="button" variant="ghost" size="icon" className={touch ? "size-11 shrink-0" : "size-7 shrink-0"} aria-label={t("common.cancel")} onClick={() => onRespond({ cancelled: true })}><X className="size-4" /></Button>
 			</div>
-
 			{request.method === "select" ? (
-				<div className="scrollbar-pro max-h-[min(45vh,20rem)] overflow-y-auto px-1 pb-1">
-					{options.map(({ key, option }, index) => (
-						<button
-							key={key}
-							ref={(node) => {
-								optionRefs.current[index] = node;
-							}}
-							type="button"
-							onFocus={() => setActiveIndex(index)}
-							onMouseEnter={() => setActiveIndex(index)}
-							onClick={() => onRespond({ value: option })}
-							onKeyDown={handleSelectKeyDown}
-							className={cn(
-								menuItemClassName,
-								"gap-2.5",
-								isTouch && "min-h-11",
-								index === activeIndex && "bg-hover text-hover-foreground",
-							)}
-						>
-							<span className="flex size-4 shrink-0 items-center justify-center text-2xs tabular-nums text-muted-foreground">
-								{index < 9 ? index + 1 : ""}
-							</span>
-							<span className="min-w-0 flex-1 truncate">{option}</span>
-						</button>
-					))}
-				</div>
+				<>
+					{request.options.length > 8 ? <div className="px-3 pb-2"><Input ref={searchRef} aria-label={copy.searchOptions} placeholder={copy.searchOptions} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (!event.nativeEvent.isComposing && event.keyCode !== 229 && event.key === "ArrowDown") { event.preventDefault(); buttons.current[0]?.focus(); } }} /></div> : null}
+					<div className="max-h-[min(45dvh,20rem)] overflow-y-auto overscroll-contain px-1 pb-1">
+						{options.length === 0 ? <p role="status" className="p-4 text-center text-xs text-muted-foreground">{copy.noOptions}</p> : options.map((option, index) => (
+							<button key={option.index} type="button" ref={(node) => { buttons.current[index] = node; }} onClick={() => onRespond({ value: option.value })}
+								onKeyDown={(event) => {
+									if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+									if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); buttons.current[(index + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length]?.focus(); }
+									else if (/^[1-9]$/.test(event.key)) { const selected = options[Number(event.key) - 1]; if (selected) { event.preventDefault(); onRespond({ value: selected.value }); } }
+								}}
+								className={cn(menuItemClassName, "w-full gap-2 text-left focus-visible:outline-2", touch && "min-h-11")}>
+								<span className="w-4 shrink-0 text-2xs text-muted-foreground">{index < 9 ? index + 1 : ""}</span><span className="min-w-0 whitespace-pre-wrap break-words">{option.value}</span>
+							</button>
+						))}
+					</div>
+				</>
 			) : null}
-
-			{request.method === "input" ? (
-				<div className="px-4 pb-3 pt-1">
-					<Input
-						ref={inputRef}
-						value={value}
-						placeholder={request.placeholder ?? undefined}
-						onChange={(event) => setValue(event.target.value)}
-						onKeyDown={(event) => {
-							if (event.key === "Enter") onRespond({ value });
-						}}
-					/>
-				</div>
-			) : null}
-
-			{request.method === "editor" ? (
-				<div className="px-4 pb-3 pt-1">
-					<Textarea
-						ref={editorRef}
-						rows={8}
-						value={value}
-						onChange={(event) => setValue(event.target.value)}
-						className="min-h-36 resize-y font-mono text-xs"
-					/>
-				</div>
-			) : null}
-
-			{request.method !== "select" ? (
-				<div className="flex justify-end gap-2 px-4 pb-3.5 pt-1">
-					{request.method === "confirm" ? (
-						<>
-							<Button
-								variant="outline"
-								size="sm"
-								className={isTouch ? "h-10 px-4" : undefined}
-								onClick={() => onRespond({ confirmed: false })}
-							>
-								{t("chat.no")}
-							</Button>
-							<Button
-								size="sm"
-								className={isTouch ? "h-10 px-4" : undefined}
-								onClick={() => onRespond({ confirmed: true })}
-							>
-								{t("chat.confirm")}
-							</Button>
-						</>
-					) : (
-						<>
-							<Button
-								variant="ghost"
-								size="sm"
-								className={isTouch ? "h-10 px-4" : undefined}
-								onClick={cancel}
-							>
-								{t("common.cancel")}
-							</Button>
-							<Button
-								size="sm"
-								className={isTouch ? "h-10 px-4" : undefined}
-								onClick={() => onRespond({ value })}
-							>
-								{t("common.confirm")}
-							</Button>
-						</>
-					)}
-				</div>
-			) : null}
-		</output>
+			{request.method === "input" ? <div className="px-4 pb-3"><Input ref={inputRef} value={value} aria-label={request.title || "Pi Extension"} placeholder={request.placeholder ?? undefined} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (!event.nativeEvent.isComposing && event.keyCode !== 229 && event.key === "Enter") { event.preventDefault(); onRespond({ value }); } }} /></div> : null}
+			{request.method === "editor" ? <div className="px-4 pb-3"><Textarea ref={editorRef} rows={8} value={value} aria-label={request.title || "Pi Extension"} onChange={(event) => setValue(event.target.value)} className="min-h-36 resize-y font-mono text-xs" onKeyDown={(event) => { if (!event.nativeEvent.isComposing && event.keyCode !== 229 && event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); onRespond({ value }); } }} /></div> : null}
+			{request.method !== "select" ? <div className="flex justify-end gap-2 px-4 pb-3">
+				<Button type="button" variant="outline" className={touch ? "min-h-11" : undefined} onClick={() => onRespond(request.method === "confirm" ? { confirmed: false } : { cancelled: true })}>{request.method === "confirm" ? t("chat.no") : t("common.cancel")}</Button>
+				<Button type="button" className={touch ? "min-h-11" : undefined} onClick={() => onRespond(request.method === "confirm" ? { confirmed: true } : { value })}>{t("common.confirm")}</Button>
+			</div> : null}
+		</div>
 	);
 }
 
-export function PiExtensionUiDialog({
-	request,
-	onRespond,
-}: PiExtensionUiDialogProps) {
-	if (!request) return null;
-	return (
-		<PiExtensionUiDialogContent
-			key={request.id}
-			request={request}
-			onRespond={onRespond}
-		/>
-	);
+export function PiExtensionUiDialog({ request, onRespond }: Props) {
+	const { active } = useChatWorkspaceScope();
+	if (!request || !active) return null;
+	return <Content key={`${request.sessionKey ?? ""}:${request.generation}:${request.id}`} request={request} onRespond={onRespond} />;
 }

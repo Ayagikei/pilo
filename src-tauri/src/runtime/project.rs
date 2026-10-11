@@ -1,15 +1,13 @@
-use std::collections::BTreeSet;
-
 use pilo_protocol::EnvironmentInfo;
-use serde::Deserialize;
-use serde_json::Value;
 use tauri::AppHandle;
 
 use crate::domain::{Connection, DiscoveredProject, Project, ProjectMetadata};
 
 use super::{pi_workspace, server_client::ServerManager, storage};
 
-const MAX_DISCOVERED_PROJECTS: usize = 200;
+#[path = "project_discovery.rs"]
+mod discovery;
+pub use discovery::{discover as discover_report, import_projects};
 
 pub fn list(app: &AppHandle) -> Result<Vec<Project>, String> {
     storage::list_projects(&storage::open(app)?)
@@ -82,7 +80,7 @@ pub fn remove(app: &AppHandle, id: &str) -> Result<Vec<Project>, String> {
         return Err(format!("Project '{id}' was not found"));
     }
     pi_workspace::remove_session_anchor(app, id)?;
-    storage::list_projects(&db)
+    list(app)
 }
 
 pub fn reorder(
@@ -95,33 +93,14 @@ pub fn reorder(
     storage::list_projects(&db)
 }
 
+/// Preserve the legacy desktop command while new UIs consume the full report.
 pub async fn discover(
     app: &AppHandle,
     servers: &ServerManager,
     connection_id: String,
 ) -> Result<Vec<DiscoveredProject>, String> {
-    let connection = resolve_connection(app, &connection_id)?;
-    let headers: Vec<Value> = servers
-        .request_typed(&connection, "session.discover", Value::Null)
-        .await?;
-    let existing = list(app)?;
-    let added_ids = existing
-        .iter()
-        .map(|project| project.id.as_str())
-        .collect::<BTreeSet<_>>();
-    let mut paths = parse_session_headers(&headers);
-    paths.truncate(MAX_DISCOVERED_PROJECTS);
-    Ok(paths
-        .into_iter()
-        .map(|path| {
-            let id = Project::stable_id(&connection.id, &path);
-            DiscoveredProject {
-                name: Project::name_from_path(&path),
-                path,
-                already_added: added_ids.contains(id.as_str()),
-            }
-        })
-        .collect())
+    Ok(discover_report(app, servers, connection_id).await?.projects
+        .into_iter().map(|candidate| candidate.project).collect())
 }
 
 pub fn resolve_connection(app: &AppHandle, connection_id: &str) -> Result<Connection, String> {
@@ -158,43 +137,4 @@ async fn inspect(
             refreshed_at_ms: storage::now_ms(),
         },
     ))
-}
-
-#[derive(Deserialize)]
-struct SessionHeader {
-    #[serde(rename = "type")]
-    kind: String,
-    cwd: String,
-}
-
-fn parse_session_headers(headers: &[Value]) -> Vec<String> {
-    let mut paths = BTreeSet::new();
-    for value in headers {
-        let Ok(header) = serde_json::from_value::<SessionHeader>(value.clone()) else {
-            continue;
-        };
-        if header.kind == "session" && !header.cwd.trim().is_empty() {
-            paths.insert(header.cwd);
-        }
-    }
-    paths.into_iter().collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_unique_project_paths_from_session_headers() {
-        let headers = vec![
-            serde_json::json!({"type":"session","version":3,"cwd":"/root/code/pilo"}),
-            serde_json::json!({"type":"session","version":3,"cwd":"/root/code/pi"}),
-            serde_json::json!({"type":"session","version":3,"cwd":"/root/code/pilo"}),
-            serde_json::json!({"type":"message","cwd":"/ignore"}),
-        ];
-        assert_eq!(
-            parse_session_headers(&headers),
-            vec!["/root/code/pi".to_owned(), "/root/code/pilo".to_owned()]
-        );
-    }
 }

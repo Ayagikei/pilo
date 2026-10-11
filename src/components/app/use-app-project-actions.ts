@@ -1,6 +1,5 @@
 import {
 	useCallback,
-	useRef,
 	useState,
 	type Dispatch,
 	type SetStateAction,
@@ -10,14 +9,11 @@ import { toast } from "sonner";
 
 import { userErrorMessage } from "@/lib/app-error";
 import { removeWslConnection } from "@/lib/connections";
-import { refreshProjectPiModels } from "@/lib/pi-models";
 import type { Connection } from "@/lib/pi-runtime";
 import {
-	addProject,
 	connectionLabel,
 	listProjects,
 	notifyProjectsChanged,
-	pickLocalProjectDirectory,
 	removeProject,
 	reorderProjects,
 	type Project,
@@ -42,54 +38,19 @@ export function useAppProjectActions({
 }: UseAppProjectActionsOptions) {
 	const { t } = useTranslation();
 	const [addProjectOpen, setAddProjectOpen] = useState(false);
-	const [addProjectConnectionId, setAddProjectConnectionId] = useState<
-		string | null
-	>(null);
-	const localProjectPickerPendingRef = useRef(false);
+	const [addProjectConnectionId, setAddProjectConnectionId] = useState<string | null>(null);
 
+	// Local, WSL and SSH share discovery. Manual browsing remains in the dialog.
 	const handleAddProject = useCallback(
 		async (connectionId?: string) => {
 			const connection =
 				connectionCatalog.find((item) => item.id === connectionId) ??
-				projects.find((project) => project.connection.id === connectionId)
-					?.connection ??
-				null;
+				projects.find((project) => project.connection.id === connectionId)?.connection;
 			if (!connection) return;
-
-			if (connection.kind.type !== "local") {
-				setAddProjectConnectionId(connection.id);
-				setAddProjectOpen(true);
-				return;
-			}
-
-			if (localProjectPickerPendingRef.current) return;
-			localProjectPickerPendingRef.current = true;
-			try {
-				const selectedPath = await pickLocalProjectDirectory();
-				if (!selectedPath) return;
-				const project = await addProject(connection.id, selectedPath);
-				void refreshProjectPiModels(project.id).catch((error) => {
-					console.warn(
-						"Failed to refresh Pi models after adding project",
-						error,
-					);
-				});
-				notifyProjectsChanged();
-				toast.success(t("project.added", { name: project.name }), {
-					description: t("project.addedDescription", {
-						connection: connectionLabel(project.connection),
-						path: project.metadata.cwd,
-					}),
-				});
-			} catch (error) {
-				toast.error(t("project.addFailed"), {
-					description: userErrorMessage(error),
-				});
-			} finally {
-				localProjectPickerPendingRef.current = false;
-			}
+			setAddProjectConnectionId(connection.id);
+			setAddProjectOpen(true);
 		},
-		[connectionCatalog, projects, t],
+		[connectionCatalog, projects],
 	);
 
 	const handleReorderProjects = useCallback(
@@ -97,29 +58,16 @@ export function useAppProjectActions({
 			const previous = projects;
 			const rank = new Map(projectIds.map((id, index) => [id, index]));
 			setProjects((current) => {
-				const reordered = current.filter(
-					(project) => project.connection.id === connectionId,
-				);
-				reordered.sort(
-					(a, b) =>
-						(rank.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
-						(rank.get(b.id) ?? Number.MAX_SAFE_INTEGER),
-				);
+				const reordered = current.filter((project) => project.connection.id === connectionId);
+				reordered.sort((a, b) => (rank.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.id) ?? Number.MAX_SAFE_INTEGER));
 				let index = 0;
-				return current.map((project) =>
-					project.connection.id === connectionId
-						? (reordered[index++] ?? project)
-						: project,
-				);
+				return current.map((project) => project.connection.id === connectionId ? (reordered[index++] ?? project) : project);
 			});
 			try {
-				const next = await reorderProjects(connectionId, projectIds);
-				setProjects(next);
+				setProjects(await reorderProjects(connectionId, projectIds));
 			} catch (error) {
 				setProjects(previous);
-				toast.error(t("project.sortFailed"), {
-					description: userErrorMessage(error),
-				});
+				toast.error(t("project.sortFailed"), { description: userErrorMessage(error) });
 			}
 		},
 		[projects, setProjects, t],
@@ -134,13 +82,9 @@ export function useAppProjectActions({
 				setProjects(next);
 				onProjectsRemoved(new Set([projectId]), next);
 				notifyProjectsChanged();
-				toast.success(t("project.removed", { name: project.name }), {
-					description: t("project.filesKept"),
-				});
+				toast.success(t("project.removed", { name: project.name }), { description: t("project.filesKept") });
 			} catch (error) {
-				toast.error(t("project.removeFailed"), {
-					description: userErrorMessage(error),
-				});
+				toast.error(t("project.removeFailed"), { description: userErrorMessage(error) });
 			}
 		},
 		[onProjectsRemoved, projects, setProjects, t],
@@ -149,47 +93,26 @@ export function useAppProjectActions({
 	const handleDeleteConnection = useCallback(
 		async (connectionId: string) => {
 			if (connectionId === "local") return;
-			const connection =
-				connectionCatalog.find((candidate) => candidate.id === connectionId) ??
-				projects.find((project) => project.connection.id === connectionId)
-					?.connection;
+			const connection = connectionCatalog.find((candidate) => candidate.id === connectionId) ?? projects.find((project) => project.connection.id === connectionId)?.connection;
 			if (!connection) return;
-
-			const affectedProjectIds = new Set(
-				projects
-					.filter((project) => project.connection.id === connectionId)
-					.map((project) => project.id),
-			);
+			const affectedProjectIds = new Set(projects.filter((project) => project.connection.id === connectionId).map((project) => project.id));
 			try {
-				if (connection.kind.type === "wsl") {
-					await removeWslConnection(connectionId);
-				} else if (connection.kind.type === "ssh") {
-					await removeSshConnection(connectionId);
-				}
+				if (connection.kind.type === "wsl") await removeWslConnection(connectionId);
+				else if (connection.kind.type === "ssh") await removeSshConnection(connectionId);
 				const nextProjects = await listProjects();
 				setProjects(nextProjects);
 				onProjectsRemoved(affectedProjectIds, nextProjects);
 				notifyProjectsChanged();
-				toast.success(
-					t("project.removed", { name: connectionLabel(connection) }),
-					{ description: t("project.connectionRecordsRemoved") },
-				);
+				toast.success(t("project.removed", { name: connectionLabel(connection) }), { description: t("project.connectionRecordsRemoved") });
 			} catch (error) {
-				toast.error(t("project.removeConnectionFailed"), {
-					description: userErrorMessage(error),
-				});
+				toast.error(t("project.removeConnectionFailed"), { description: userErrorMessage(error) });
 			}
 		},
 		[connectionCatalog, onProjectsRemoved, projects, setProjects, t],
 	);
 
 	return {
-		addProjectOpen,
-		setAddProjectOpen,
-		addProjectConnectionId,
-		handleAddProject,
-		handleReorderProjects,
-		handleDeleteProject,
-		handleDeleteConnection,
+		addProjectOpen, setAddProjectOpen, addProjectConnectionId,
+		handleAddProject, handleReorderProjects, handleDeleteProject, handleDeleteConnection,
 	};
 }
